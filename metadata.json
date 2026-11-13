@@ -1,0 +1,6 @@
+{
+  "name": "Horizon Apex",
+  "description": "Open-world 3D racing game with customizable supercars, deep engine tuning, dynamic weather physics, and real-time online multiplayer lobbies.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
