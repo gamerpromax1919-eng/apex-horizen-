@@ -1,5 +1,6 @@
 import {
   SHARED_CARS_CONFIG,
+  STARTER_OWNED_CAR_IDS,
   createDefaultCustomizationFromConfig,
   createDefaultTuningFromConfig,
   createDefaultUpgradesFromConfig,
@@ -8,6 +9,7 @@ import {
 import type { CarCustomization, SharedCarConfig, TuningSetup, UpgradeLevels } from './types';
 
 export const CAR_ROSTER: SharedCarConfig[] = SHARED_CARS_CONFIG;
+export { STARTER_OWNED_CAR_IDS };
 
 export const PAINT_SWATCHES = [
   { name: 'Rosso Corsa', hex: '#dc2626' },

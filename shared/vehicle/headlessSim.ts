@@ -1,5 +1,5 @@
 import { computeAxleDifferentialTorques, computeTorqueAtRpm, getGearRatioForGear, STAGE_MULTIPLIERS, stepGearboxAndClutch } from './drivetrain';
-import { computeGenericSurfaceGrip, DRIVE_PRESET_PROFILE, solvePacejkaTire, STEERING_ASSIST_PROFILES } from './pacejka';
+import { computeGenericSurfaceGrip, computeSteerAndStability, solvePacejkaTire } from './pacejka';
 import { applyAntiRollBars, computeDynamicWeightTransfer } from './suspension';
 import type {
   ControlSample,
@@ -169,12 +169,11 @@ export function stepHeadlessVehicle120Hz(
   state.simTimeSec += dt;
 
   const drivePreset = opts.drivePreset ?? 'sim_lite';
-  const preset = DRIVE_PRESET_PROFILE[drivePreset];
-  const steeringAssist = opts.steeringAssist ?? preset.defaultSteeringAssist;
-  const assistProfile = STEERING_ASSIST_PROFILES[steeringAssist];
-  const absEnabled = opts.absEnabled ?? preset.defaultAbs;
-  const tcsEnabled = opts.tcsEnabled ?? preset.defaultTcs;
-  const escEnabled = opts.escEnabled ?? preset.defaultEsc;
+  const steeringAssist =
+    opts.steeringAssist ?? (drivePreset === 'arcade' ? 'full' : drivePreset === 'sim' ? 'off' : 'countersteer');
+  const absEnabled = opts.absEnabled ?? drivePreset !== 'sim';
+  const tcsEnabled = opts.tcsEnabled ?? drivePreset !== 'sim';
+  const escEnabled = opts.escEnabled ?? drivePreset !== 'sim';
   const useThermalWear = opts.useThermalWear ?? true;
   const groundQuery = opts.groundQuery ?? DEFAULT_GROUND_QUERY;
 
@@ -195,18 +194,33 @@ export function stepHeadlessVehicle120Hz(
   const speedMs = Math.hypot(state.vx, state.vz);
   const speedKmh = speedMs * 3.6;
 
-  // 1. Speed-sensitive steering + Steering Assist (Countersteer / Stability)
-  const maxSteer = 0.56 / (1 + speedKmh * assistProfile.speedSteerCurve);
-  const bodySlipRad = speedMs > 3.5 ? Math.atan2(vLateral, Math.max(1.5, Math.abs(vForward))) : 0;
-  const countersteerOffset =
-    speedMs > 5 && assistProfile.countersteerGain > 0
-      ? Math.max(-0.28, Math.min(0.28, -bodySlipRad * assistProfile.countersteerGain))
-      : 0;
-  const targetSteer = Math.max(
-    -maxSteer * 1.15,
-    Math.min(maxSteer * 1.15, input.steer * maxSteer * (input.handbrake ? 1.15 : 1.0) + countersteerOffset)
+  // 1. Speed-sensitive steering + corrected countersteer + grip-capped yaw stabilization
+  const centerGroundPre = groundQuery(state.x, state.z);
+  const centerGripPre = computeGenericSurfaceGrip(
+    centerGroundPre.surface,
+    tuning.tireCompound,
+    centerGroundPre.roadGripMult ?? 1,
+    centerGroundPre.dirtGripMult ?? 1,
+    centerGroundPre.hydroplaneRisk ?? 0,
+    speedKmh
   );
-  state.steerAngle += (targetSteer - state.steerAngle) * (1 - Math.exp(-12 * dt));
+  const steerStab = computeSteerAndStability({
+    dt,
+    rawSteer: input.steer,
+    handbrake: input.handbrake,
+    prevSteerAngle: state.steerAngle,
+    speedMs,
+    vForward,
+    vLateral,
+    yawRate: state.yawRate,
+    wheelbaseM: car.wheelbaseM,
+    surfaceGrip: centerGripPre,
+    massKg,
+    drivePreset,
+    steeringAssist,
+    escEnabled,
+  });
+  state.steerAngle = steerStab.steerAngle;
 
   const wheelBase = car.wheelbaseM;
   const halfTrack = car.trackWidthM * 0.5;
@@ -315,12 +329,12 @@ export function stepHeadlessVehicle120Hz(
   const wtTransfer = computeDynamicWeightTransfer({
     massKg,
     longAccelMs2: longAccel,
-    latAccelMs2: latAccel,
+    latAccelMs2: -latAccel,
     cgHeightM,
     wheelbaseM: wheelBase,
     trackWidthM: car.trackWidthM,
     staticFrontRatio: 0.51,
-    frontArbRollShare: 0.52,
+    frontArbRollShare: 0.56,
   });
   state.longG = wtTransfer.longG;
   state.latG = wtTransfer.latG;
@@ -433,18 +447,26 @@ export function stepHeadlessVehicle120Hz(
     if (
       tcsEnabled &&
       driveTorque * Math.sign(state.wheelOmegas[i] || 1) > 0 &&
-      Math.abs(currentSlip) > 0.15 &&
       speedMs > 2.0
     ) {
-      const tcsCut = Math.max(0.45, 1 - (Math.abs(currentSlip) - 0.15) * 2.2);
-      driveTorque *= tcsCut;
-      anyTcs = true;
+      let tcsCut = 1.0;
+      if (Math.abs(currentSlip) > 0.20) {
+        tcsCut = Math.max(0.38, 1 - (Math.abs(currentSlip) - 0.20) * 1.8);
+      }
+      if (Math.abs(steerStab.bodySlipRad) > 0.24 && input.throttle > 0.25) {
+        tcsCut = Math.min(tcsCut, Math.max(0.55, 1 - (Math.abs(steerStab.bodySlipRad) - 0.24) * 1.4));
+      }
+      if (tcsCut < 0.99) {
+        driveTorque *= tcsCut;
+        anyTcs = true;
+      }
     }
 
     const slipRatio =
       (state.wheelOmegas[i] * wheelRadiusM - wVLong) / Math.max(2.2, Math.abs(wVLong));
     const slipAngleRad = Math.atan2(wVLat, Math.max(2.2, Math.abs(wVLong)));
 
+    const rearStabilityMult = isRear && !input.handbrake ? 1.07 : 1.0;
     const pacejka = solvePacejkaTire({
       normalLoadN: fNormal,
       slipRatio,
@@ -457,7 +479,7 @@ export function stepHeadlessVehicle120Hz(
       camberRad: i % 2 === 0 ? camberRad : -camberRad,
       drivePreset,
       isRearHandbrake: isRear && input.handbrake,
-      carTireGripMultiplier: car.tireGripMultiplier,
+      carTireGripMultiplier: car.tireGripMultiplier * rearStabilityMult,
     });
 
     wt.slipRatio = slipRatio;
@@ -504,25 +526,15 @@ export function stepHeadlessVehicle120Hz(
 
   state.absActive = anyAbs;
   state.tcsActive = anyTcs;
-  state.escActive = false;
+  state.escActive = steerStab.escActive;
 
   // 6. ESC & Yaw Assist Stability Torque
-  if (speedMs > 6) {
-    const desiredYawRate = (state.steerAngle * Math.min(28, speedMs)) / Math.max(2.2, wheelBase);
-    const yawError = desiredYawRate - state.yawRate;
-    if (escEnabled && Math.abs(bodySlipRad) > 0.24 && !input.handbrake) {
-      state.escActive = true;
-      sumYawTorque += yawError * massKg * 1.45;
-    } else if (assistProfile.yawDampGain > 0 || preset.steerAssist > 0) {
-      const assistWeight = Math.max(assistProfile.yawDampGain, preset.steerAssist);
-      sumYawTorque += yawError * massKg * 0.65 * assistWeight;
-    }
-  }
+  sumYawTorque += steerStab.yawStabilityTorqueNm;
 
   // Integrate rigid body velocity & yaw in world coordinates
   const worldForceX = fwdX * sumFwdForce + rightX * sumLatForce;
   const worldForceZ = fwdZ * sumFwdForce + rightZ * sumLatForce;
-  const yawInertia = massKg * 2.35;
+  const yawInertia = massKg * 2.55;
 
   state.vx += (worldForceX / massKg) * dt;
   state.vz += (worldForceZ / massKg) * dt;

@@ -301,3 +301,164 @@ export function computeEffectiveSpecs(
     dynoCurve,
   };
 }
+
+export interface UpgradeCatalogItem {
+  key: keyof UpgradeLevels;
+  label: string;
+  desc: string;
+  stageCosts: [number, number, number];
+}
+
+export const UPGRADE_CATALOG: UpgradeCatalogItem[] = [
+  {
+    key: 'engine',
+    label: 'Engine Internals',
+    desc: '+14% HP & higher redline per stage',
+    stageCosts: [4500, 9500, 18000],
+  },
+  {
+    key: 'turbo',
+    label: 'Twin-Scroll Turbo',
+    desc: '+3.5 PSI peak boost per stage',
+    stageCosts: [5000, 11000, 21000],
+  },
+  {
+    key: 'tires',
+    label: 'Tire Compound',
+    desc: 'Street → Semi-Slick → Racing Slicks',
+    stageCosts: [3800, 8200, 15500],
+  },
+  {
+    key: 'suspension',
+    label: 'Coilover Kit',
+    desc: '+8% spring & damper authority',
+    stageCosts: [3200, 7000, 13000],
+  },
+  {
+    key: 'weightReduction',
+    label: 'Carbon Chassis',
+    desc: '-48 kg curb weight per stage',
+    stageCosts: [4200, 9200, 17500],
+  },
+  {
+    key: 'aero',
+    label: 'Active Aero',
+    desc: '+10% speed-squared downforce',
+    stageCosts: [3000, 6800, 12500],
+  },
+];
+
+export function getCarUpgradeMaxStage(
+  car: Partial<SharedCarConfig>,
+  part: keyof UpgradeLevels
+): number {
+  const slots = car.upgradeSlots;
+  if (!slots) return 3;
+  switch (part) {
+    case 'engine':
+      return slots.engineMaxStage;
+    case 'tires':
+      return slots.tiresMaxLevel;
+    case 'suspension':
+      return slots.suspensionMaxLevel;
+    case 'turbo':
+      return slots.turboMaxLevel;
+    case 'weightReduction':
+      return slots.weightMaxLevel;
+    case 'aero':
+      return slots.aeroMaxLevel;
+  }
+}
+
+export function getUpgradeStageCost(part: keyof UpgradeLevels, targetStage: number): number {
+  if (targetStage <= 0) return 0;
+  const item = UPGRADE_CATALOG.find((u) => u.key === part);
+  if (!item) return 5000;
+  return item.stageCosts[Math.min(2, Math.max(0, targetStage - 1))];
+}
+
+export type ShowroomStatKey = 'power' | 'handling' | 'weight' | 'speed';
+
+export interface ShowroomStatBar {
+  key: ShowroomStatKey;
+  label: string;
+  score: number; // 0..100
+  baselineScore: number; // 0..100
+  delta: number;
+  valueLabel: string;
+}
+
+function clampScore(v: number): number {
+  return Math.round(Math.max(8, Math.min(100, v)));
+}
+
+function scorePower(hp: number): number {
+  return clampScore(((hp - 320) / 1080) * 88 + 12);
+}
+
+function scoreHandling(lateralG: number): number {
+  return clampScore(((lateralG - 0.85) / 0.85) * 88 + 12);
+}
+
+function scoreWeightLightness(weightKg: number): number {
+  // Lower curb weight yields a higher lightness/agility bar score
+  return clampScore(((1720 - weightKg) / 760) * 86 + 14);
+}
+
+function scoreTopSpeed(topSpeedKmh: number): number {
+  return clampScore(((topSpeedKmh - 200) / 230) * 88 + 12);
+}
+
+export function computeShowroomStatBars(
+  specs: EffectiveCarSpecs,
+  baselineSpecs?: EffectiveCarSpecs
+): ShowroomStatBar[] {
+  const base = baselineSpecs ?? specs;
+  const p = scorePower(specs.peakHp);
+  const bp = scorePower(base.peakHp);
+
+  const h = scoreHandling(specs.lateralG);
+  const bh = scoreHandling(base.lateralG);
+
+  const w = scoreWeightLightness(specs.weightKg);
+  const bw = scoreWeightLightness(base.weightKg);
+
+  const s = scoreTopSpeed(specs.topSpeedKmh);
+  const bs = scoreTopSpeed(base.topSpeedKmh);
+
+  return [
+    {
+      key: 'power',
+      label: 'Power',
+      score: p,
+      baselineScore: bp,
+      delta: p - bp,
+      valueLabel: `${specs.peakHp} HP`,
+    },
+    {
+      key: 'handling',
+      label: 'Handling',
+      score: h,
+      baselineScore: bh,
+      delta: h - bh,
+      valueLabel: `${specs.lateralG.toFixed(2)} G`,
+    },
+    {
+      key: 'weight',
+      label: 'Weight',
+      score: w,
+      baselineScore: bw,
+      delta: w - bw,
+      valueLabel: `${specs.weightKg} kg`,
+    },
+    {
+      key: 'speed',
+      label: 'Speed',
+      score: s,
+      baselineScore: bs,
+      delta: s - bs,
+      valueLabel: `${specs.topSpeedKmh} km/h`,
+    },
+  ];
+}
+

@@ -118,6 +118,7 @@ export interface SharedCarConfig extends CarDefinition {
   upgradeSlots: CarUpgradeSlots;
   basePi: number;
   baseClass: CarClass;
+  priceCr: number;
 }
 
 export interface CarCustomization {

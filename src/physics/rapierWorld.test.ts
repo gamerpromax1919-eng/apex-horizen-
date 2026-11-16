@@ -55,3 +55,54 @@ test('Rapier 120Hz vehicle accelerates forward under throttle and rewinds safely
 
   physics.dispose();
 });
+
+test('Rapier 120Hz RWD supercar corners stably under full throttle + full steer in sim_lite', async () => {
+  await ensureRapierInitialized();
+  const physics = new RapierPhysicsWorld();
+  const car = CAR_ROSTER[1]; // Solstice GT-R (740 HP RWD)
+  const tuning = createDefaultTuning(car);
+  const upgrades = createDefaultUpgrades();
+
+  const handle = physics.spawnVehicle('player', car, tuning, upgrades, 'festival_circuit', 0, 'sim_lite');
+
+  const configs = new Map([
+    [
+      'player',
+      {
+        car,
+        tuning,
+        upgrades,
+        input: {
+          throttle: 1,
+          brake: 0,
+          steer: 1,
+          handbrake: false,
+          nitrous: false,
+          shiftUp: false,
+          shiftDown: false,
+        },
+        weatherId: 'clear_golden' as const,
+        trackId: 'festival_circuit' as const,
+        raceActive: true,
+        frozen: false,
+      },
+    ],
+  ]);
+
+  // Accelerate straight 2s (~100 km/h), then hold full left steer + full throttle for 1.5s
+  for (let i = 0; i < 120; i++) {
+    configs.get('player')!.input.steer = 0;
+    physics.step(1 / 60, configs);
+  }
+  let maxDriftAngle = 0;
+  for (let i = 0; i < 90; i++) {
+    configs.get('player')!.input.steer = 1;
+    physics.step(1 / 60, configs);
+    maxDriftAngle = Math.max(maxDriftAngle, handle.telemetry.driftAngleDeg);
+  }
+
+  assert.ok(handle.telemetry.speedKmh > 60, `Expected car to sustain speed in corner, got ${handle.telemetry.speedKmh.toFixed(1)}`);
+  assert.ok(maxDriftAngle < 42, `Expected controlled cornering without spinout (<42 deg), peaked at ${maxDriftAngle.toFixed(1)}`);
+
+  physics.dispose();
+});

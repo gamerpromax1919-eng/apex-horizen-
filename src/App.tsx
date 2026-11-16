@@ -550,6 +550,8 @@ export default function App() {
   const gameMode = useGameStore((s) => s.gameMode);
   const activeModal = useGameStore((s) => s.activeModal);
   const carId = useGameStore((s) => s.carId);
+  const ownedCarIds = useGameStore((s) => s.ownedCarIds);
+  const testDriveCarId = useGameStore((s) => s.testDriveCarId);
   const glbModelId = useGameStore((s) => s.glbModelId);
   const activeModelCredit = useGameStore((s) => s.activeModelCredit);
   const playerName = useGameStore((s) => s.playerName);
@@ -557,6 +559,7 @@ export default function App() {
   const customizations = useGameStore((s) => s.customizations);
   const tunings = useGameStore((s) => s.tunings);
   const upgrades = useGameStore((s) => s.upgrades);
+  const purchasedUpgrades = useGameStore((s) => s.purchasedUpgrades);
   const drivePreset = useGameStore((s) => s.drivePreset);
   const steeringAssist = useGameStore((s) => s.steeringAssist);
   const gamepadSettings = useGameStore((s) => s.gamepadSettings);
@@ -585,12 +588,16 @@ export default function App() {
   const setGameMode = useGameStore((s) => s.setGameMode);
   const setActiveModal = useGameStore((s) => s.setActiveModal);
   const selectCar = useGameStore((s) => s.selectCar);
+  const buyCar = useGameStore((s) => s.buyCar);
+  const startTestDrive = useGameStore((s) => s.startTestDrive);
+  const exitTestDrive = useGameStore((s) => s.exitTestDrive);
   const setGlbModelId = useGameStore((s) => s.setGlbModelId);
   const setActiveModelCredit = useGameStore((s) => s.setActiveModelCredit);
   const setPlayerName = useGameStore((s) => s.setPlayerName);
   const updateCustomization = useGameStore((s) => s.updateCustomization);
   const updateTuning = useGameStore((s) => s.updateTuning);
   const purchaseUpgrade = useGameStore((s) => s.purchaseUpgrade);
+  const setUpgradeStage = useGameStore((s) => s.setUpgradeStage);
   const setDrivePreset = useGameStore((s) => s.setDrivePreset);
   const setSteeringAssist = useGameStore((s) => s.setSteeringAssist);
   const setGamepadSettings = useGameStore((s) => s.setGamepadSettings);
@@ -847,6 +854,11 @@ export default function App() {
     [car, tuning, carUpgrades]
   );
 
+  // Sync chassis mass into Rapier immediately when upgrades or tuning change
+  useEffect(() => {
+    physicsRef.current?.syncVehicleMass('player', car, tuning, carUpgrades);
+  }, [car, tuning, carUpgrades]);
+
   const canvasDpr: number | [number, number] = isSoftwareGl
     ? 1
     : qualityTier === 'ultra'
@@ -920,6 +932,7 @@ export default function App() {
           telemetry={telemetry}
           redlineRpm={effective.effectiveTuning.revLimitRpm}
           cameraMode={cameraMode}
+          drivePreset={drivePreset}
           manualTransmission={manualTransmission}
           absEnabled={absEnabled}
           tcsEnabled={tcsEnabled}
@@ -934,12 +947,35 @@ export default function App() {
           localPlayerId={mp.playerId}
           countdownSec={mp.countdownSec}
           modelCredit={activeModelCredit}
+          testDriveCarName={testDriveCarId ? getCarById(testDriveCarId).name : null}
+          testDrivePriceCr={
+            testDriveCarId && !ownedCarIds.includes(testDriveCarId)
+              ? getCarById(testDriveCarId).priceCr
+              : undefined
+          }
+          canAffordTestDrive={
+            testDriveCarId ? credits >= getCarById(testDriveCarId).priceCr : false
+          }
+          onExitTestDrive={() => {
+            exitTestDrive();
+            setTimeout(() => rebuildGrid(trackId), 0);
+          }}
+          onBuyTestDriveCar={() => {
+            if (testDriveCarId && buyCar(testDriveCarId)) {
+              setTimeout(() => rebuildGrid(trackId), 0);
+            }
+          }}
           onOpenGarage={() => setActiveModal('garage')}
           onOpenWeather={() => setActiveModal('weather')}
           onOpenMultiplayer={() => setActiveModal('multiplayer')}
           onOpenEngineer={() => setActiveModal('engineer')}
           onOpenPhoto={() => setGameMode('photo')}
           onCycleCamera={handleCycleCamera}
+          onCycleDrivePreset={() => {
+            const order = ['arcade', 'sim_lite', 'sim'] as const;
+            const next = order[(order.indexOf(drivePreset) + 1) % order.length];
+            setDrivePreset(next);
+          }}
           onResetCar={handleResetCar}
           onRewind={handleRewind}
           onToggleMute={() => setAudioMixer({ muted: !audioMixer.muted })}
@@ -978,10 +1014,13 @@ export default function App() {
       {activeModal === 'garage' && (
         <GarageModal
           carId={carId}
+          ownedCarIds={ownedCarIds}
+          testDriveCarId={testDriveCarId}
           glbModelId={glbModelId}
-          customization={customization}
-          tuning={tuning}
-          upgrades={carUpgrades}
+          customizations={customizations}
+          tunings={tunings}
+          upgrades={upgrades}
+          purchasedUpgrades={purchasedUpgrades}
           credits={credits}
           isSoftwareGl={isSoftwareGl}
           customGlbUrl={customGlbUrl}
@@ -989,10 +1028,22 @@ export default function App() {
             selectCar(id);
             setTimeout(() => rebuildGrid(trackId), 0);
           }}
+          onBuyCar={(id) => {
+            const ok = buyCar(id);
+            if (ok) {
+              setTimeout(() => rebuildGrid(trackId), 0);
+            }
+            return ok;
+          }}
+          onStartTestDrive={(id) => {
+            startTestDrive(id);
+            setTimeout(() => rebuildGrid(trackId), 0);
+          }}
           onSelectGlbModel={setGlbModelId}
           onUpdateCustomization={updateCustomization}
           onUpdateTuning={updateTuning}
           onPurchaseUpgrade={purchaseUpgrade}
+          onSetUpgradeStage={setUpgradeStage}
           onUploadGlb={setCustomGlbUrl}
           onClose={() => setActiveModal('none')}
         />

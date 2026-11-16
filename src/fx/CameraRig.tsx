@@ -108,16 +108,17 @@ export function CameraRig({
     }
 
     if (cameraMode === 'chase' || cameraMode === 'far_chase') {
-      const dist = cameraMode === 'far_chase' ? 8.6 + speedNorm * 1.4 : 6.1 + speedNorm * 1.1;
-      const height = cameraMode === 'far_chase' ? 2.85 : 2.15;
-      const driftSwing = t.isDrifting ? 0.36 : 0.14;
+      const dist = cameraMode === 'far_chase' ? 8.6 + speedNorm * 1.4 : 6.2 + speedNorm * 1.1;
+      const height = cameraMode === 'far_chase' ? 2.85 : 2.2;
+      const driftSwing = t.isDrifting ? 0.34 : 0.18;
       const armDir = _fwd.clone().lerp(_velDir, driftSwing).normalize();
-      const lookAhead = _right.clone().multiplyScalar(-t.steerAngle * 2.2);
+      // +X (_right) is left in +Z-forward frame; positive steerAngle (>0 = left) looks left into the apex
+      const lookAhead = _right.clone().multiplyScalar(t.steerAngle * 1.45);
 
       _desiredPos
         .set(t.x, t.y + height, t.z)
         .addScaledVector(armDir, -dist)
-        .addScaledVector(_right, t.steerAngle * 0.7);
+        .addScaledVector(_right, -t.steerAngle * 0.45);
       _desiredLook
         .set(t.x, t.y + 1.05, t.z)
         .addScaledVector(_fwd, 10 + speedNorm * 6)

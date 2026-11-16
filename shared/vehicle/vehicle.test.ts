@@ -9,6 +9,7 @@ import {
 import {
   computeAxleDifferentialTorques,
   computeDynamicWeightTransfer,
+  computeSteerAndStability,
   createHeadlessVehicleState,
   solvePacejkaTire,
   stepHeadlessVehicle120Hz,
@@ -164,4 +165,87 @@ test('Shared Pacejka combined slip friction ellipse trades off lateral grip unde
     drivePreset: 'sim_lite',
   });
   assert.ok(Math.abs(combined.fy) < Math.abs(pureLat.fy));
+});
+
+test('Countersteer assist steers opposite to oversteer spin and ESC opposes excessive yaw', () => {
+  // Left spin (vLateral < 0 in +X-left frame) must steer RIGHT (< 0) to catch slide
+  let prev = 0;
+  let leftSpin = computeSteerAndStability({
+    dt: 1 / 120,
+    rawSteer: 0,
+    handbrake: false,
+    prevSteerAngle: prev,
+    speedMs: 28,
+    vForward: 26,
+    vLateral: -10,
+    yawRate: 0.9,
+    wheelbaseM: 2.7,
+    surfaceGrip: 1.05,
+    massKg: 1400,
+    drivePreset: 'sim_lite',
+    steeringAssist: 'countersteer',
+    escEnabled: true,
+  });
+  for (let i = 0; i < 12; i++) {
+    prev = leftSpin.steerAngle;
+    leftSpin = computeSteerAndStability({
+      dt: 1 / 120,
+      rawSteer: 0,
+      handbrake: false,
+      prevSteerAngle: prev,
+      speedMs: 28,
+      vForward: 26,
+      vLateral: -10,
+      yawRate: 0.9,
+      wheelbaseM: 2.7,
+      surfaceGrip: 1.05,
+      massKg: 1400,
+      drivePreset: 'sim_lite',
+      steeringAssist: 'countersteer',
+      escEnabled: true,
+    });
+  }
+  assert.ok(leftSpin.steerAngle < -0.05, `Expected right countersteer (< -0.05), got ${leftSpin.steerAngle}`);
+  assert.equal(leftSpin.escActive, true);
+  assert.ok(leftSpin.yawStabilityTorqueNm < 0, 'ESC should apply negative yaw torque to arrest +yaw spin');
+
+  // Right spin (vLateral > 0) must steer LEFT (> 0)
+  prev = 0;
+  let rightSpin = computeSteerAndStability({
+    dt: 1 / 120,
+    rawSteer: 0,
+    handbrake: false,
+    prevSteerAngle: prev,
+    speedMs: 28,
+    vForward: 26,
+    vLateral: 10,
+    yawRate: -0.9,
+    wheelbaseM: 2.7,
+    surfaceGrip: 1.05,
+    massKg: 1400,
+    drivePreset: 'sim_lite',
+    steeringAssist: 'countersteer',
+    escEnabled: true,
+  });
+  for (let i = 0; i < 12; i++) {
+    prev = rightSpin.steerAngle;
+    rightSpin = computeSteerAndStability({
+      dt: 1 / 120,
+      rawSteer: 0,
+      handbrake: false,
+      prevSteerAngle: prev,
+      speedMs: 28,
+      vForward: 26,
+      vLateral: 10,
+      yawRate: -0.9,
+      wheelbaseM: 2.7,
+      surfaceGrip: 1.05,
+      massKg: 1400,
+      drivePreset: 'sim_lite',
+      steeringAssist: 'countersteer',
+      escEnabled: true,
+    });
+  }
+  assert.ok(rightSpin.steerAngle > 0.05, `Expected left countersteer (> 0.05), got ${rightSpin.steerAngle}`);
+  assert.ok(rightSpin.yawStabilityTorqueNm > 0);
 });

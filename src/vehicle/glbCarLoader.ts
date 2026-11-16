@@ -23,12 +23,19 @@ export interface PreparedCarGlb {
     WheelPivotRig | null,
   ];
   paintMaterials: THREE.MeshPhysicalMaterial[];
+  rimMaterials: THREE.MeshStandardMaterial[];
+  caliperMaterials: THREE.MeshStandardMaterial[];
   glassMaterials: THREE.MeshPhysicalMaterial[];
   headlightMaterials: THREE.MeshStandardMaterial[];
   taillightMaterials: THREE.MeshStandardMaterial[];
   config: CarGlbModelConfig;
   loadedUrl: string;
   dimensions: { width: number; height: number; length: number };
+  surfaceAnchors: {
+    hoodY: number;
+    roofY: number;
+    trunkY: number;
+  };
 }
 
 const GSTATIC_DRACO_PATH = 'https://www.gstatic.com/draco/versioned/decoders/1.5.6/';
@@ -386,8 +393,10 @@ function prepareNormalizedScene(
     };
   }
 
-  // 6. Upgrade materials (Physical clearcoat paint, transmission glass, emissive lights, rubber tires)
+  // 6. Upgrade materials (Physical clearcoat paint, transmission glass, emissive lights, rubber tires, rims, calipers)
   const paintMaterials: THREE.MeshPhysicalMaterial[] = [];
+  const rimMaterials: THREE.MeshStandardMaterial[] = [];
+  const caliperMaterials: THREE.MeshStandardMaterial[] = [];
   const glassMaterials: THREE.MeshPhysicalMaterial[] = [];
   const headlightMaterials: THREE.MeshStandardMaterial[] = [];
   const taillightMaterials: THREE.MeshStandardMaterial[] = [];
@@ -508,6 +517,39 @@ function prepareNormalizedScene(
       return tire;
     }
 
+    // Check Calipers
+    if (/caliper|pinza/i.test(matName + '_' + meshName)) {
+      const cal = new THREE.MeshStandardMaterial({
+        color: stdOrig.color ? stdOrig.color.clone() : new THREE.Color('#f59e0b'),
+        metalness: 0.6,
+        roughness: 0.28,
+        envMapIntensity: 1.2,
+      });
+      cal.name = matName || 'upgraded_caliper';
+      caliperMaterials.push(cal);
+      materialUpgradeCache.set(orig, cal);
+      return cal;
+    }
+
+    // Check Rims (non-tire wheel alloy/spoke meshes)
+    if (
+      isWheelMesh &&
+      !/disc|rotor|brake|black_rubber|sidewall/i.test(matName + '_' + meshName) &&
+      (/rim|alloy|spoke|wheel|metal|silver|chrome|alum|hub/i.test(matName + '_' + meshName) ||
+        (stdOrig.metalness ?? 0) >= 0.3)
+    ) {
+      const rim = new THREE.MeshStandardMaterial({
+        color: stdOrig.color ? stdOrig.color.clone() : new THREE.Color('#cbd5e1'),
+        metalness: 0.86,
+        roughness: 0.22,
+        envMapIntensity: 1.35,
+      });
+      rim.name = matName || 'upgraded_rim';
+      rimMaterials.push(rim);
+      materialUpgradeCache.set(orig, rim);
+      return rim;
+    }
+
     // Standard material enhancement: ensure envMapIntensity for crisp IBL reflections
     if ('envMapIntensity' in stdOrig) {
       stdOrig.envMapIntensity = 1.15;
@@ -560,10 +602,36 @@ function prepareNormalizedScene(
     }
   }
 
+  // Sample actual top-surface Y anchors for flush aero wing & livery overlays
+  root.updateMatrixWorld(true);
+  const bodyMeshes: THREE.Object3D[] = [];
+  modelHolder.traverse((obj) => {
+    if (obj instanceof THREE.Mesh && !wheelMeshSet.has(obj)) {
+      bodyMeshes.push(obj);
+    }
+  });
+  const ray = new THREE.Raycaster();
+  const sampleTopY = (zFrac: number, fallbackFrac: number): number => {
+    const zCoord = scaledSize.z * zFrac;
+    ray.set(new THREE.Vector3(0, scaledSize.y + 1.5, zCoord), new THREE.Vector3(0, -1, 0));
+    const hits = ray.intersectObjects(bodyMeshes, false);
+    if (hits.length > 0) {
+      return hits[0].point.y;
+    }
+    return scaledSize.y * fallbackFrac;
+  };
+  const surfaceAnchors = {
+    hoodY: sampleTopY(0.28, 0.56),
+    roofY: sampleTopY(-0.04, 0.98),
+    trunkY: sampleTopY(-0.42, 0.68),
+  };
+
   return {
     root,
     wheels: wheelPivots,
     paintMaterials,
+    rimMaterials,
+    caliperMaterials,
     glassMaterials,
     headlightMaterials,
     taillightMaterials,
@@ -574,6 +642,7 @@ function prepareNormalizedScene(
       height: scaledSize.y,
       length: scaledSize.z,
     },
+    surfaceAnchors,
   };
 }
 

@@ -23,6 +23,7 @@ import {
 import type {
   AiRacerSnapshot,
   CameraMode,
+  DrivePreset,
   LobbyRoomState,
   RemotePlayerState,
   TimeOfDayId,
@@ -35,6 +36,7 @@ interface RacingHudProps {
   telemetry: VehicleTelemetry;
   redlineRpm: number;
   cameraMode: CameraMode;
+  drivePreset: DrivePreset;
   manualTransmission: boolean;
   absEnabled: boolean;
   tcsEnabled: boolean;
@@ -49,12 +51,18 @@ interface RacingHudProps {
   localPlayerId: string | null;
   countdownSec: number;
   modelCredit?: string | null;
+  testDriveCarName?: string | null;
+  testDrivePriceCr?: number;
+  canAffordTestDrive?: boolean;
+  onExitTestDrive?: () => void;
+  onBuyTestDriveCar?: () => void;
   onOpenGarage: () => void;
   onOpenWeather: () => void;
   onOpenMultiplayer: () => void;
   onOpenEngineer: () => void;
   onOpenPhoto: () => void;
   onCycleCamera: () => void;
+  onCycleDrivePreset?: () => void;
   onResetCar: () => void;
   onRewind: () => void;
   onToggleMute: () => void;
@@ -86,6 +94,7 @@ export const RacingHud: React.FC<RacingHudProps> = ({
   telemetry,
   redlineRpm,
   cameraMode,
+  drivePreset,
   manualTransmission,
   absEnabled,
   tcsEnabled,
@@ -100,12 +109,18 @@ export const RacingHud: React.FC<RacingHudProps> = ({
   localPlayerId,
   countdownSec,
   modelCredit,
+  testDriveCarName,
+  testDrivePriceCr,
+  canAffordTestDrive,
+  onExitTestDrive,
+  onBuyTestDriveCar,
   onOpenGarage,
   onOpenWeather,
   onOpenMultiplayer,
   onOpenEngineer,
   onOpenPhoto,
   onCycleCamera,
+  onCycleDrivePreset,
   onResetCar,
   onRewind,
   onToggleMute,
@@ -297,6 +312,48 @@ export const RacingHud: React.FC<RacingHudProps> = ({
               <span>S2 {formatMs(telemetry.sectorTimesMs[1])}</span>
               <span>S3 {formatMs(telemetry.sectorTimesMs[2])}</span>
               <span className="text-emerald-400">Best {formatMs(telemetry.bestLapMs)}</span>
+            </div>
+          )}
+
+          {testDriveCarName && (
+            <div
+              data-testid="hud-test-drive-banner"
+              className="flex items-center gap-2.5 px-3.5 py-1.5 rounded-lg border border-sky-400/50 bg-[#0b101b]/92 text-xs text-sky-100"
+            >
+              <span className="font-display font-bold tracking-wide text-sky-300">
+                TEST DRIVE · {testDriveCarName}
+              </span>
+              {typeof testDrivePriceCr === 'number' && onBuyTestDriveCar && (
+                <button
+                  type="button"
+                  tabIndex={-1}
+                  disabled={!canAffordTestDrive}
+                  onClick={(e) => {
+                    e.currentTarget.blur();
+                    onBuyTestDriveCar();
+                  }}
+                  className={`px-2.5 py-0.5 rounded text-[11px] font-bold cursor-pointer ${
+                    canAffordTestDrive
+                      ? 'bg-emerald-500 hover:bg-emerald-400 text-slate-950'
+                      : 'bg-white/10 text-slate-400 cursor-not-allowed'
+                  }`}
+                >
+                  Buy {testDrivePriceCr.toLocaleString()} CR
+                </button>
+              )}
+              {onExitTestDrive && (
+                <button
+                  type="button"
+                  tabIndex={-1}
+                  onClick={(e) => {
+                    e.currentTarget.blur();
+                    onExitTestDrive();
+                  }}
+                  className="px-2.5 py-0.5 rounded bg-white/12 hover:bg-white/22 text-[11px] font-semibold text-slate-100 cursor-pointer"
+                >
+                  End Test Drive
+                </button>
+              )}
             </div>
           )}
 
@@ -548,10 +605,26 @@ export const RacingHud: React.FC<RacingHudProps> = ({
 
             <div className="flex items-center gap-3">
               <div className="text-right tabular-nums">
-                <div className="text-xs font-mono text-sky-400">
-                  {telemetry.boostPsi > 0
-                    ? `+${telemetry.boostPsi.toFixed(1)} PSI`
-                    : `${telemetry.boostPsi.toFixed(1)} VAC`}
+                <div className="flex items-center justify-end gap-1.5">
+                  {onCycleDrivePreset && (
+                    <button
+                      type="button"
+                      tabIndex={-1}
+                      onClick={(e) => {
+                        e.currentTarget.blur();
+                        onCycleDrivePreset();
+                      }}
+                      title="Click to cycle handling mode (Arcade / Sim-Lite / Sim)"
+                      className="pointer-events-auto px-1.5 py-0.5 rounded bg-white/10 hover:bg-amber-500/25 border border-white/12 text-[10px] font-bold uppercase tracking-wide text-amber-300 cursor-pointer transition-colors"
+                    >
+                      {drivePreset === 'arcade' ? 'Arcade' : drivePreset === 'sim' ? 'Sim' : 'Sim-Lite'}
+                    </button>
+                  )}
+                  <span className="text-xs font-mono text-sky-400">
+                    {telemetry.boostPsi > 0
+                      ? `+${telemetry.boostPsi.toFixed(1)} PSI`
+                      : `${telemetry.boostPsi.toFixed(1)} VAC`}
+                  </span>
                 </div>
                 <div className="flex items-center justify-end gap-1.5 mt-1 text-[10px] font-mono">
                   <span

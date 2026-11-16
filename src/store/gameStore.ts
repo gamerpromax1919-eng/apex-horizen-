@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import {
   CAR_ROSTER,
+  STARTER_OWNED_CAR_IDS,
   createDefaultCustomization,
   createDefaultTuning,
   createDefaultUpgrades,
@@ -27,6 +28,7 @@ import type {
 import { DEFAULT_GAMEPAD_SETTINGS, DEFAULT_KEY_BINDINGS } from '../config/controls';
 import { DRIVE_PRESET_PROFILE } from '../physics/pacejka';
 import { createDefaultTelemetry } from '../physics/rapierWorld';
+import { getCarUpgradeMaxStage, getUpgradeStageCost } from '../physics/tuning';
 import type { CarModelSelection } from '../vehicle/carModels.config';
 
 export interface ReplayFrame {
@@ -58,6 +60,7 @@ const STORAGE_KEY = 'horizon_apex_garage_v2';
 
 interface PersistedProfile {
   carId: string;
+  ownedCarIds: string[];
   glbModelId: CarModelSelection;
   playerName: string;
   credits: number;
@@ -65,6 +68,7 @@ interface PersistedProfile {
   customizations: Record<string, CarCustomization>;
   tunings: Record<string, TuningSetup>;
   upgrades: Record<string, UpgradeLevels>;
+  purchasedUpgrades: Record<string, UpgradeLevels>;
   keyBindings: KeyBindings;
   gamepadSettings: GamepadSettings;
   steeringAssist: SteeringAssistMode;
@@ -77,15 +81,26 @@ function loadProfile(): PersistedProfile {
     if (raw) {
       const parsed = JSON.parse(raw);
       if (parsed && parsed.carId) {
+        const ownedSet = new Set<string>(
+          Array.isArray(parsed.ownedCarIds) && parsed.ownedCarIds.length > 0
+            ? parsed.ownedCarIds
+            : STARTER_OWNED_CAR_IDS
+        );
+        ownedSet.add(parsed.carId);
+        const upgradesMap: Record<string, UpgradeLevels> = parsed.upgrades || {
+          [initialCar.id]: createDefaultUpgrades(),
+        };
         return {
           carId: parsed.carId,
+          ownedCarIds: Array.from(ownedSet),
           glbModelId: parsed.glbModelId || 'auto',
           playerName: parsed.playerName || 'ApexDriver',
           credits: typeof parsed.credits === 'number' ? parsed.credits : 125000,
           xp: typeof parsed.xp === 'number' ? parsed.xp : 1200,
           customizations: parsed.customizations || { [initialCar.id]: createDefaultCustomization(initialCar) },
           tunings: parsed.tunings || { [initialCar.id]: createDefaultTuning(initialCar) },
-          upgrades: parsed.upgrades || { [initialCar.id]: createDefaultUpgrades() },
+          upgrades: upgradesMap,
+          purchasedUpgrades: parsed.purchasedUpgrades || upgradesMap,
           keyBindings: { ...DEFAULT_KEY_BINDINGS, ...(parsed.keyBindings || {}) },
           gamepadSettings: { ...DEFAULT_GAMEPAD_SETTINGS, ...(parsed.gamepadSettings || {}) },
           steeringAssist: parsed.steeringAssist || 'countersteer',
@@ -97,6 +112,7 @@ function loadProfile(): PersistedProfile {
   }
   return {
     carId: initialCar.id,
+    ownedCarIds: [...STARTER_OWNED_CAR_IDS],
     glbModelId: 'auto',
     playerName: 'ApexDriver',
     credits: 125000,
@@ -104,6 +120,7 @@ function loadProfile(): PersistedProfile {
     customizations: { [initialCar.id]: createDefaultCustomization(initialCar) },
     tunings: { [initialCar.id]: createDefaultTuning(initialCar) },
     upgrades: { [initialCar.id]: createDefaultUpgrades() },
+    purchasedUpgrades: { [initialCar.id]: createDefaultUpgrades() },
     keyBindings: { ...DEFAULT_KEY_BINDINGS },
     gamepadSettings: { ...DEFAULT_GAMEPAD_SETTINGS },
     steeringAssist: 'countersteer',
@@ -142,6 +159,9 @@ export interface GameStoreState {
   gameMode: GameModeState;
   activeModal: 'none' | 'garage' | 'weather' | 'multiplayer' | 'engineer' | 'controls';
   carId: string;
+  ownedCarIds: string[];
+  testDriveCarId: string | null;
+  preTestDriveCarId: string | null;
   glbModelId: CarModelSelection;
   activeModelCredit: string | null;
   playerName: string;
@@ -150,6 +170,7 @@ export interface GameStoreState {
   customizations: Record<string, CarCustomization>;
   tunings: Record<string, TuningSetup>;
   upgrades: Record<string, UpgradeLevels>;
+  purchasedUpgrades: Record<string, UpgradeLevels>;
   drivePreset: DrivePreset;
   steeringAssist: SteeringAssistMode;
   gamepadSettings: GamepadSettings;
@@ -182,12 +203,16 @@ export interface GameStoreState {
   setGameMode: (mode: GameModeState) => void;
   setActiveModal: (modal: GameStoreState['activeModal']) => void;
   selectCar: (carId: string) => void;
+  buyCar: (carId: string) => boolean;
+  startTestDrive: (carId: string) => void;
+  exitTestDrive: () => void;
   setGlbModelId: (modelId: CarModelSelection) => void;
   setActiveModelCredit: (credit: string | null) => void;
   setPlayerName: (name: string) => void;
-  updateCustomization: (c: CarCustomization) => void;
-  updateTuning: (t: TuningSetup) => void;
-  purchaseUpgrade: (part: keyof UpgradeLevels) => void;
+  updateCustomization: (c: CarCustomization, targetCarId?: string) => void;
+  updateTuning: (t: TuningSetup, targetCarId?: string) => void;
+  purchaseUpgrade: (part: keyof UpgradeLevels, targetCarId?: string) => boolean;
+  setUpgradeStage: (part: keyof UpgradeLevels, stage: number, targetCarId?: string) => void;
   setDrivePreset: (preset: DrivePreset) => void;
   setSteeringAssist: (mode: SteeringAssistMode) => void;
   setGamepadSettings: (patch: Partial<GamepadSettings>) => void;
@@ -215,8 +240,16 @@ export interface GameStoreState {
 function persist(state: GameStoreState): void {
   if (typeof localStorage === 'undefined') return;
   try {
+    // Never persist temporary unowned test-drive car as active equipped car
+    const activeOwnedCarId =
+      state.testDriveCarId && !state.ownedCarIds.includes(state.testDriveCarId)
+        ? state.preTestDriveCarId && state.ownedCarIds.includes(state.preTestDriveCarId)
+          ? state.preTestDriveCarId
+          : state.ownedCarIds[0] ?? state.carId
+        : state.carId;
     const payload: PersistedProfile = {
-      carId: state.carId,
+      carId: activeOwnedCarId,
+      ownedCarIds: state.ownedCarIds,
       glbModelId: state.glbModelId,
       playerName: state.playerName,
       credits: state.credits,
@@ -224,6 +257,7 @@ function persist(state: GameStoreState): void {
       customizations: state.customizations,
       tunings: state.tunings,
       upgrades: state.upgrades,
+      purchasedUpgrades: state.purchasedUpgrades,
       keyBindings: state.keyBindings,
       gamepadSettings: state.gamepadSettings,
       steeringAssist: state.steeringAssist,
@@ -242,6 +276,9 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
   gameMode: 'title',
   activeModal: 'none',
   carId: initialProfile.carId,
+  ownedCarIds: initialProfile.ownedCarIds,
+  testDriveCarId: null,
+  preTestDriveCarId: null,
   glbModelId: initialProfile.glbModelId,
   activeModelCredit: null,
   playerName: initialProfile.playerName,
@@ -250,6 +287,7 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
   customizations: initialProfile.customizations,
   tunings: initialProfile.tunings,
   upgrades: initialProfile.upgrades,
+  purchasedUpgrades: initialProfile.purchasedUpgrades,
   drivePreset: 'sim_lite',
   steeringAssist: initialProfile.steeringAssist,
   gamepadSettings: initialProfile.gamepadSettings,
@@ -260,7 +298,7 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
   manualTransmission: false,
   absEnabled: true,
   tcsEnabled: true,
-  escEnabled: false,
+  escEnabled: true,
   rewindsRemaining: 3,
   aiCount: 5,
   aiDifficulty: 'pro',
@@ -311,7 +349,108 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
       ...s.upgrades,
       [carId]: s.upgrades[carId] ?? createDefaultUpgrades(),
     };
-    set({ carId, customizations, tunings, upgrades });
+    const purchasedUpgrades = {
+      ...s.purchasedUpgrades,
+      [carId]: s.purchasedUpgrades[carId] ?? createDefaultUpgrades(),
+    };
+    set({
+      carId,
+      testDriveCarId: null,
+      preTestDriveCarId: null,
+      customizations,
+      tunings,
+      upgrades,
+      purchasedUpgrades,
+    });
+    persist(get());
+  },
+
+  buyCar: (carId) => {
+    const car = getCarById(carId);
+    const s = get();
+    if (s.ownedCarIds.includes(carId)) {
+      get().selectCar(carId);
+      return true;
+    }
+    if (s.credits < car.priceCr) {
+      return false;
+    }
+    const nextOwned = [...s.ownedCarIds, carId];
+    const customizations = {
+      ...s.customizations,
+      [carId]: s.customizations[carId] ?? createDefaultCustomization(car),
+    };
+    const tunings = {
+      ...s.tunings,
+      [carId]: s.tunings[carId] ?? createDefaultTuning(car),
+    };
+    const upgrades = {
+      ...s.upgrades,
+      [carId]: s.upgrades[carId] ?? createDefaultUpgrades(),
+    };
+    const purchasedUpgrades = {
+      ...s.purchasedUpgrades,
+      [carId]: s.purchasedUpgrades[carId] ?? createDefaultUpgrades(),
+    };
+    set({
+      credits: s.credits - car.priceCr,
+      ownedCarIds: nextOwned,
+      carId,
+      testDriveCarId: null,
+      preTestDriveCarId: null,
+      customizations,
+      tunings,
+      upgrades,
+      purchasedUpgrades,
+    });
+    persist(get());
+    return true;
+  },
+
+  startTestDrive: (carId) => {
+    const car = getCarById(carId);
+    const s = get();
+    const restoreId = s.testDriveCarId ? s.preTestDriveCarId : s.carId;
+    const customizations = {
+      ...s.customizations,
+      [carId]: s.customizations[carId] ?? createDefaultCustomization(car),
+    };
+    const tunings = {
+      ...s.tunings,
+      [carId]: s.tunings[carId] ?? createDefaultTuning(car),
+    };
+    const upgrades = {
+      ...s.upgrades,
+      [carId]: s.upgrades[carId] ?? createDefaultUpgrades(),
+    };
+    const purchasedUpgrades = {
+      ...s.purchasedUpgrades,
+      [carId]: s.purchasedUpgrades[carId] ?? createDefaultUpgrades(),
+    };
+    set({
+      carId,
+      testDriveCarId: carId,
+      preTestDriveCarId: restoreId ?? s.ownedCarIds[0] ?? CAR_ROSTER[0].id,
+      customizations,
+      tunings,
+      upgrades,
+      purchasedUpgrades,
+      activeModal: 'none',
+      gameMode: 'playing',
+    });
+  },
+
+  exitTestDrive: () => {
+    const s = get();
+    const targetId =
+      s.preTestDriveCarId && s.ownedCarIds.includes(s.preTestDriveCarId)
+        ? s.preTestDriveCarId
+        : s.ownedCarIds[0] ?? CAR_ROSTER[0].id;
+    set({
+      carId: targetId,
+      testDriveCarId: null,
+      preTestDriveCarId: null,
+    });
     persist(get());
   },
 
@@ -327,24 +466,91 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
     persist(get());
   },
 
-  updateCustomization: (c) => {
+  updateCustomization: (c, targetCarId) => {
     const s = get();
-    set({ customizations: { ...s.customizations, [s.carId]: c } });
+    const id = targetCarId ?? s.carId;
+    set({ customizations: { ...s.customizations, [id]: c } });
     persist(get());
   },
 
-  updateTuning: (t) => {
+  updateTuning: (t, targetCarId) => {
     const s = get();
-    set({ tunings: { ...s.tunings, [s.carId]: t } });
+    const id = targetCarId ?? s.carId;
+    set({ tunings: { ...s.tunings, [id]: t } });
     persist(get());
   },
 
-  purchaseUpgrade: (part) => {
+  purchaseUpgrade: (part, targetCarId) => {
     const s = get();
-    const curr = s.upgrades[s.carId] ?? createDefaultUpgrades();
-    const nextLvl = (curr[part] + 1) % 4;
-    const nextUpgrades = { ...curr, [part]: nextLvl };
-    set({ upgrades: { ...s.upgrades, [s.carId]: nextUpgrades } });
+    const id = targetCarId ?? s.carId;
+    const car = getCarById(id);
+    const maxSlot = getCarUpgradeMaxStage(car, part);
+    if (maxSlot <= 0) return false;
+
+    const currEquipped = s.upgrades[id] ?? createDefaultUpgrades();
+    const currPurchased = s.purchasedUpgrades[id] ?? createDefaultUpgrades();
+    const unlockedMax = Math.min(maxSlot, currPurchased[part] ?? 0);
+
+    // If next stage is already unlocked, install it at zero cost
+    const nextTarget = currEquipped[part] + 1;
+    if (nextTarget <= unlockedMax) {
+      set({
+        upgrades: {
+          ...s.upgrades,
+          [id]: { ...currEquipped, [part]: nextTarget },
+        },
+      });
+      persist(get());
+      return true;
+    }
+
+    // Buy the next locked stage up to maxSlot
+    if (unlockedMax < maxSlot) {
+      const stageToBuy = unlockedMax + 1;
+      const cost = getUpgradeStageCost(part, stageToBuy);
+      if (s.credits < cost) return false;
+      set({
+        credits: s.credits - cost,
+        upgrades: {
+          ...s.upgrades,
+          [id]: { ...currEquipped, [part]: stageToBuy },
+        },
+        purchasedUpgrades: {
+          ...s.purchasedUpgrades,
+          [id]: { ...currPurchased, [part]: stageToBuy },
+        },
+      });
+      persist(get());
+      return true;
+    }
+
+    // Already unlocked up to maxSlot: cycle back to stock (0) for fine PI class balancing
+    const cycled = (currEquipped[part] + 1) % (maxSlot + 1);
+    set({
+      upgrades: {
+        ...s.upgrades,
+        [id]: { ...currEquipped, [part]: cycled },
+      },
+    });
+    persist(get());
+    return true;
+  },
+
+  setUpgradeStage: (part, stage, targetCarId) => {
+    const s = get();
+    const id = targetCarId ?? s.carId;
+    const car = getCarById(id);
+    const maxSlot = getCarUpgradeMaxStage(car, part);
+    const currEquipped = s.upgrades[id] ?? createDefaultUpgrades();
+    const currPurchased = s.purchasedUpgrades[id] ?? createDefaultUpgrades();
+    const unlockedMax = Math.min(maxSlot, currPurchased[part] ?? 0);
+    const clamped = Math.max(0, Math.min(unlockedMax, stage));
+    set({
+      upgrades: {
+        ...s.upgrades,
+        [id]: { ...currEquipped, [part]: clamped },
+      },
+    });
     persist(get());
   },
 

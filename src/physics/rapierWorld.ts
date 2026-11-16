@@ -4,12 +4,12 @@ import {
   applyAntiRollBars,
   computeAxleDifferentialTorques,
   computeDynamicWeightTransfer,
+  computeSteerAndStability,
   computeTorqueAtRpm,
   DRIVE_PRESET_PROFILE,
   getGearRatioForGear,
   solvePacejkaTire,
   solveWheelSuspension,
-  STEERING_ASSIST_PROFILES,
   stepGearboxAndClutch,
 } from '../../shared/vehicle';
 import type { ControlSample } from '../config/controls';
@@ -315,13 +315,13 @@ export class RapierPhysicsWorld {
       .setTranslation(telemetry.x, telemetry.y, telemetry.z)
       .setRotation({ x: telemetry.qx, y: telemetry.qy, z: telemetry.qz, w: telemetry.qw })
       .setLinearDamping(0.04)
-      .setAngularDamping(0.18)
+      .setAngularDamping(0.26)
       .setAdditionalMassProperties(
         massKg,
         { x: 0, y: effectiveCar.comHeightOffsetM, z: 0 },
         {
           x: massKg * 1.45,
-          y: massKg * 2.35,
+          y: massKg * 2.55,
           z: massKg * 0.55,
         },
         { x: 0, y: 0, z: 0, w: 1 }
@@ -390,6 +390,31 @@ export class RapierPhysicsWorld {
 
     this.vehicles.set(id, handle);
     return handle;
+  }
+
+  public syncVehicleMass(
+    id: string,
+    car: CarDefinition & Partial<SharedCarConfig>,
+    tuning: TuningSetup,
+    upgrades: UpgradeLevels
+  ): void {
+    const v = this.vehicles.get(id);
+    if (!v) return;
+    const { effectiveCar } = applyUpgradesToTuning(car, tuning, upgrades);
+    const massKg = Math.max(940, effectiveCar.baseWeightKg);
+    if (Math.abs(v.massKg - massKg) < 0.5) return;
+    v.massKg = massKg;
+    v.body.setAdditionalMassProperties(
+      massKg,
+      { x: 0, y: effectiveCar.comHeightOffsetM, z: 0 },
+      {
+        x: massKg * 1.45,
+        y: massKg * 2.55,
+        z: massKg * 0.55,
+      },
+      { x: 0, y: 0, z: 0, w: 1 },
+      true
+    );
   }
 
   public resetVehicleToRoad(
@@ -674,23 +699,33 @@ export class RapierPhysicsWorld {
     t.vz = linvel.z;
     t.speedKmh = speedKmh;
 
-    // 1. Speed-Sensitive Steering + Countersteer Assist + Ackermann Geometry
-    const preset = DRIVE_PRESET_PROFILE[v.drivePreset];
-    const assistProfile = STEERING_ASSIST_PROFILES[v.steeringAssist];
-    const maxSteer = 0.56 / (1 + speedKmh * assistProfile.speedSteerCurve);
-    const bodySlipRad = speedMs > 4 ? Math.atan2(vLateral, Math.max(1.5, Math.abs(vForward))) : 0;
-    const countersteerHelp =
-      speedMs > 5 && assistProfile.countersteerGain > 0
-        ? Math.max(-0.28, Math.min(0.28, -bodySlipRad * assistProfile.countersteerGain))
-        : 0;
-    const targetSteer = Math.max(
-      -maxSteer * 1.15,
-      Math.min(
-        maxSteer * 1.15,
-        input.steer * maxSteer * (input.handbrake ? 1.15 : 1.0) + countersteerHelp
-      )
+    // 1. Speed-Sensitive Steering + Corrected Countersteer Assist + Ackermann Geometry
+    const centerSurfPre = getSurfaceType(pos.x, pos.z, weatherId);
+    const centerPhysPre = computeSurfacePhysics(
+      centerSurfPre,
+      tuning.tireCompound,
+      weatherId,
+      speedKmh,
+      tuning.rideHeightMm
     );
-    t.steerAngle += (targetSteer - t.steerAngle) * (1 - Math.exp(-12 * dt));
+    const steerStab = computeSteerAndStability({
+      dt,
+      rawSteer: input.steer,
+      handbrake: input.handbrake,
+      prevSteerAngle: t.steerAngle,
+      speedMs,
+      vForward,
+      vLateral,
+      yawRate: angvel.y,
+      wheelbaseM: car.wheelbaseM,
+      surfaceGrip: centerPhysPre.grip * v.debugGripScale,
+      massKg: v.massKg,
+      drivePreset: v.drivePreset,
+      steeringAssist: v.steeringAssist,
+      escEnabled: v.escEnabled,
+    });
+    const bodySlipRad = steerStab.bodySlipRad;
+    t.steerAngle = steerStab.steerAngle;
     t.indicatorLeft = t.steerAngle > 0.14;
     t.indicatorRight = t.steerAngle < -0.14;
 
@@ -802,12 +837,12 @@ export class RapierPhysicsWorld {
     const wtTransfer = computeDynamicWeightTransfer({
       massKg: v.massKg,
       longAccelMs2: rawLongAccel,
-      latAccelMs2: rawLatAccel,
+      latAccelMs2: -rawLatAccel,
       cgHeightM,
       wheelbaseM: wheelBase,
       trackWidthM: car.trackWidthM,
       staticFrontRatio: 0.51,
-      frontArbRollShare: 0.52,
+      frontArbRollShare: 0.56,
     });
     t.longG += (wtTransfer.longG - t.longG) * 0.28;
     t.latG += (wtTransfer.latG - t.latG) * 0.28;
@@ -962,12 +997,19 @@ export class RapierPhysicsWorld {
       if (
         v.tcsEnabled &&
         driveTorque * Math.sign(v.wheelOmegas[i] || 1) > 0 &&
-        Math.abs(currentSlip) > 0.15 &&
         speedMs > 2.0
       ) {
-        const tcsCut = Math.max(0.45, 1 - (Math.abs(currentSlip) - 0.15) * 2.2);
-        driveTorque *= tcsCut;
-        anyTcsActive = true;
+        let tcsCut = 1.0;
+        if (Math.abs(currentSlip) > 0.20) {
+          tcsCut = Math.max(0.38, 1 - (Math.abs(currentSlip) - 0.20) * 1.8);
+        }
+        if (Math.abs(bodySlipRad) > 0.24 && input.throttle > 0.25) {
+          tcsCut = Math.min(tcsCut, Math.max(0.55, 1 - (Math.abs(bodySlipRad) - 0.24) * 1.4));
+        }
+        if (tcsCut < 0.99) {
+          driveTorque *= tcsCut;
+          anyTcsActive = true;
+        }
       }
 
       if (wt.grounded && fNormal > 1) {
@@ -981,6 +1023,7 @@ export class RapierPhysicsWorld {
           (v.wheelOmegas[i] * wheelRadiusM - wVLong) / Math.max(2.2, Math.abs(wVLong));
         const slipAngleRad = Math.atan2(wVLat, Math.max(2.2, Math.abs(wVLong)));
 
+        const rearStabilityMult = isRear && !input.handbrake ? 1.07 : 1.0;
         const pacejka = solvePacejkaTire({
           normalLoadN: fNormal,
           slipRatio,
@@ -993,7 +1036,7 @@ export class RapierPhysicsWorld {
           camberRad: i % 2 === 0 ? camberRad : -camberRad,
           drivePreset: v.drivePreset,
           isRearHandbrake: isRear && input.handbrake,
-          carTireGripMultiplier: car.tireGripMultiplier,
+          carTireGripMultiplier: (car.tireGripMultiplier ?? 1.0) * rearStabilityMult,
         });
 
         wt.slipRatio = slipRatio;
@@ -1065,20 +1108,12 @@ export class RapierPhysicsWorld {
     t.reversing = t.gear === -1;
 
     // 6. ESC Electronic Stability Control & Steering Assist Yaw Damping
-    const yawRate = angvel.y;
     t.driftAngleDeg = (Math.abs(bodySlipRad) * 180) / Math.PI;
     t.escActive = false;
 
-    if (groundedCount >= 2 && speedMs > 6) {
-      const desiredYawRate = (t.steerAngle * Math.min(28, speedMs)) / Math.max(2.2, wheelBase);
-      const yawError = desiredYawRate - yawRate;
-      if (v.escEnabled && Math.abs(bodySlipRad) > 0.24 && !input.handbrake) {
-        t.escActive = true;
-        v.body.addTorque({ x: 0, y: yawError * v.massKg * 1.45, z: 0 }, true);
-      } else if (assistProfile.yawDampGain > 0 || preset.steerAssist > 0) {
-        const assistWeight = Math.max(assistProfile.yawDampGain, preset.steerAssist);
-        v.body.addTorque({ x: 0, y: yawError * v.massKg * 0.65 * assistWeight, z: 0 }, true);
-      }
+    if (groundedCount >= 2 && steerStab.yawStabilityTorqueNm !== 0) {
+      t.escActive = steerStab.escActive;
+      v.body.addTorque({ x: 0, y: steerStab.yawStabilityTorqueNm, z: 0 }, true);
     }
 
     // Crosswind lateral weather force

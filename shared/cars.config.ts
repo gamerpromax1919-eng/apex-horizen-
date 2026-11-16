@@ -151,9 +151,32 @@ function estimateBasePi(
   return Math.round(Math.max(580, Math.min(999, raw)));
 }
 
+export const STARTER_OWNED_CAR_IDS: string[] = [
+  'valkyrie-hyper-x',
+  'solstice-gtr',
+  'kurogane-r35',
+];
+
+function estimateCarPriceCr(
+  pi: number,
+  category: string,
+  hp: number
+): number {
+  const catMult =
+    category === 'Hypercar' || category === 'EV Hypercar'
+      ? 1.35
+      : category === 'Supercar'
+        ? 1.15
+        : category === 'Track GT'
+          ? 1.05
+          : 0.9;
+  const raw = ((pi - 520) * 320 + hp * 45) * catMult;
+  return Math.max(35000, Math.round(raw / 1000) * 1000);
+}
+
 type CarDraft = Omit<
   SharedCarConfig,
-  'glbUrl' | 'fallbackGlbUrl' | 'scale' | 'wheelNodeNames' | 'basePi' | 'baseClass'
+  'glbUrl' | 'fallbackGlbUrl' | 'scale' | 'wheelNodeNames' | 'basePi' | 'baseClass' | 'priceCr'
 >;
 
 const CAR_DRAFTS: CarDraft[] = [
@@ -646,6 +669,7 @@ export const SHARED_CARS_CONFIG: SharedCarConfig[] = CAR_DRAFTS.map((draft) => {
     wheelNodeNames: glbSpec.wheelNodeNames,
     basePi,
     baseClass: classifyCarPi(basePi),
+    priceCr: estimateCarPriceCr(basePi, draft.category, draft.baseHp),
   };
 });
 

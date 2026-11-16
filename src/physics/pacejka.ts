@@ -6,8 +6,15 @@ export {
   TIRE_COMPOUND_STATS,
   SURFACE_FRICTION_BASE,
   computeGenericSurfaceGrip,
+  computeSteerAndStability,
   magicFormula,
   solvePacejkaTire,
 } from '../../shared/vehicle/pacejka';
 
-export type { PacejkaParams, TireSolveInput, TireSolveOutput } from '../../shared/vehicle/pacejka';
+export type {
+  PacejkaParams,
+  SteerAndStabilityInput,
+  SteerAndStabilityOutput,
+  TireSolveInput,
+  TireSolveOutput,
+} from '../../shared/vehicle/pacejka';

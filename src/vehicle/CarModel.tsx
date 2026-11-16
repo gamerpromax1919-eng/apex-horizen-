@@ -1,7 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
-import type { CarCustomization, CarDefinition, VehicleTelemetry } from '../config/types';
+import type {
+  CarCustomization,
+  CarDefinition,
+  SharedCarConfig,
+  VehicleTelemetry,
+} from '../config/types';
 import {
   getMetallicFlakeNormalTexture,
   getRacingNumberTexture,
@@ -10,7 +15,7 @@ import type { CarModelSelection } from './carModels.config';
 import { loadCarGlbWithCascade, type PreparedCarGlb } from './glbCarLoader';
 
 export interface CarModelProps {
-  car: CarDefinition;
+  car: CarDefinition & Partial<SharedCarConfig>;
   customization: CarCustomization;
   telemetry?: VehicleTelemetry;
   telemetryRef?: React.RefObject<VehicleTelemetry>;
@@ -120,7 +125,10 @@ function CarModelInner({
   const paintMatRef = useRef<THREE.MeshPhysicalMaterial>(null);
 
   const isGhost = typeof ghostOpacity === 'number' && ghostOpacity < 1;
-  const shouldUseGlb = enableGlb && !isGhost && (glbModelId !== 'procedural' || Boolean(customGlbUrl));
+  const effectiveGlbSelection: CarModelSelection =
+    glbModelId === 'auto' ? (car.glbModelId ?? 'auto') : glbModelId;
+  const shouldUseGlb =
+    enableGlb && !isGhost && (effectiveGlbSelection !== 'procedural' || Boolean(customGlbUrl));
   const hasWorldPose = Boolean(pose || telemetry || telemetryRef);
 
   // Cascading GLB load with Draco support, traversal log, wheel extraction & fallback
@@ -134,7 +142,7 @@ function CarModelInner({
 
     onModelStatusChange?.({ loading: true, credit: null, loadedModelName: null });
 
-    loadCarGlbWithCascade(glbModelId, customGlbUrl, isSoftwareGl)
+    loadCarGlbWithCascade(effectiveGlbSelection, customGlbUrl, isSoftwareGl)
       .then((res) => {
         if (!active) return;
         setPreparedGlb(res);
@@ -156,7 +164,7 @@ function CarModelInner({
     return () => {
       active = false;
     };
-  }, [shouldUseGlb, glbModelId, customGlbUrl, isSoftwareGl, onModelStatusChange, invalidate]);
+  }, [shouldUseGlb, effectiveGlbSelection, customGlbUrl, isSoftwareGl, onModelStatusChange, invalidate]);
 
   const dims = useMemo(() => {
     const isTrophy = car.archetype === 'trophy';
@@ -201,7 +209,7 @@ function CarModelInner({
     return { metalness, roughness, clearcoat, clearcoatRoughness };
   }, [customization.paintFinish]);
 
-  // Apply Garage paint color, finish & window tint to upgraded GLB materials
+  // Apply Garage paint color, rim color, caliper accent, finish & window tint to upgraded GLB materials
   useEffect(() => {
     if (!preparedGlb) return;
     for (const mat of preparedGlb.paintMaterials) {
@@ -215,6 +223,16 @@ function CarModelInner({
       mat.envMapIntensity = 1.35;
       mat.needsUpdate = true;
     }
+    for (const rim of preparedGlb.rimMaterials) {
+      rim.color.set(customization.rimColor);
+      rim.roughness = customization.rimStyle === 'rally_fan' ? 0.36 : 0.18;
+      rim.metalness = customization.rimStyle === 'aero_dish' ? 0.92 : 0.84;
+      rim.needsUpdate = true;
+    }
+    for (const cal of preparedGlb.caliperMaterials) {
+      cal.color.set(customization.caliperColor);
+      cal.needsUpdate = true;
+    }
     for (const glass of preparedGlb.glassMaterials) {
       glass.transmission = isSoftwareGl
         ? 0
@@ -225,7 +243,18 @@ function CarModelInner({
       glass.needsUpdate = true;
     }
     invalidate();
-  }, [preparedGlb, customization.primaryColor, customization.windowTint, paintConfig, flakeNormal, isSoftwareGl, invalidate]);
+  }, [
+    preparedGlb,
+    customization.primaryColor,
+    customization.rimColor,
+    customization.rimStyle,
+    customization.caliperColor,
+    customization.windowTint,
+    paintConfig,
+    flakeNormal,
+    isSoftwareGl,
+    invalidate,
+  ]);
 
   const localWheelRot = useRef<[number, number, number, number]>([0, 0, 0, 0]);
 
@@ -432,11 +461,92 @@ function CarModelInner({
   if (preparedGlb && !isGhost) {
     const glbW = preparedGlb.dimensions.width;
     const glbL = preparedGlb.dimensions.length;
+    const { hoodY, roofY, trunkY } = preparedGlb.surfaceAnchors;
     return (
       <group ref={rootRef}>
         <group ref={visualOffsetRef} position={[0, visualYOffset, 0]}>
           <primitive object={preparedGlb.root} />
           <primitive object={headlightTarget} position={[0, 0.25, 28]} />
+
+          {/* Flush Rear Aero Spoiler Overlay on GLB Chassis */}
+          {customization.aeroKit !== 'stock' && (
+            <group position={[0, trunkY + 0.02, -glbL * 0.42]}>
+              <mesh
+                position={[0, customization.aeroKit === 'gt_wing' ? 0.19 : 0.04, 0]}
+                castShadow={!isSoftwareGl}
+              >
+                <boxGeometry
+                  args={[
+                    glbW * (customization.aeroKit === 'gt_wing' ? 0.88 : 0.74),
+                    0.036,
+                    customization.aeroKit === 'gt_wing' ? 0.24 : 0.12,
+                  ]}
+                />
+                <meshStandardMaterial color={secColor} roughness={0.28} metalness={0.65} />
+              </mesh>
+              {customization.aeroKit === 'gt_wing' && (
+                <>
+                  <mesh position={[glbW * 0.24, 0.095, 0]}>
+                    <boxGeometry args={[0.032, 0.19, 0.1]} />
+                    <meshStandardMaterial color="#111827" roughness={0.4} metalness={0.75} />
+                  </mesh>
+                  <mesh position={[-glbW * 0.24, 0.095, 0]}>
+                    <boxGeometry args={[0.032, 0.19, 0.1]} />
+                    <meshStandardMaterial color="#111827" roughness={0.4} metalness={0.75} />
+                  </mesh>
+                </>
+              )}
+            </group>
+          )}
+
+          {/* Flush Livery Decals on GLB Chassis */}
+          {customization.livery === 'dual_stripe' && (
+            <>
+              <mesh position={[0.14, hoodY + 0.015, glbL * 0.27]} rotation={[0.12, 0, 0]}>
+                <boxGeometry args={[0.095, 0.012, glbL * 0.34]} />
+                <meshStandardMaterial color={secColor} roughness={0.28} metalness={0.4} />
+              </mesh>
+              <mesh position={[-0.14, hoodY + 0.015, glbL * 0.27]} rotation={[0.12, 0, 0]}>
+                <boxGeometry args={[0.095, 0.012, glbL * 0.34]} />
+                <meshStandardMaterial color={secColor} roughness={0.28} metalness={0.4} />
+              </mesh>
+              <mesh position={[0.14, roofY + 0.014, -glbL * 0.03]}>
+                <boxGeometry args={[0.095, 0.012, glbL * 0.28]} />
+                <meshStandardMaterial color={secColor} roughness={0.28} metalness={0.4} />
+              </mesh>
+              <mesh position={[-0.14, roofY + 0.014, -glbL * 0.03]}>
+                <boxGeometry args={[0.095, 0.012, glbL * 0.28]} />
+                <meshStandardMaterial color={secColor} roughness={0.28} metalness={0.4} />
+              </mesh>
+            </>
+          )}
+
+          {customization.livery === 'carbon_hood' && (
+            <mesh position={[0, hoodY + 0.014, glbL * 0.27]} rotation={[0.12, 0, 0]}>
+              <boxGeometry args={[glbW * 0.56, 0.014, glbL * 0.33]} />
+              <meshPhysicalMaterial color="#18181b" roughness={0.34} metalness={0.45} clearcoat={0.7} />
+            </mesh>
+          )}
+
+          {customization.livery === 'horizon_split' && (
+            <mesh position={[0, roofY + 0.014, -glbL * 0.03]}>
+              <boxGeometry args={[glbW * 0.54, 0.015, glbL * 0.32]} />
+              <meshPhysicalMaterial color={secColor} roughness={0.22} metalness={0.6} clearcoat={0.9} />
+            </mesh>
+          )}
+
+          {customization.livery === 'racing_number' && numberTex && (
+            <>
+              <mesh position={[glbW * 0.495, hoodY * 0.72, 0.05]} rotation={[0, Math.PI / 2, 0]}>
+                <planeGeometry args={[0.42, 0.42]} />
+                <meshStandardMaterial map={numberTex} transparent />
+              </mesh>
+              <mesh position={[-glbW * 0.495, hoodY * 0.72, 0.05]} rotation={[0, -Math.PI / 2, 0]}>
+                <planeGeometry args={[0.42, 0.42]} />
+                <meshStandardMaterial map={numberTex} transparent />
+              </mesh>
+            </>
+          )}
 
           {/* NOS Exhaust Flames */}
           <group ref={nosFlamesRef} visible={false}>

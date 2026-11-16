@@ -34,14 +34,14 @@ export const SURFACE_FRICTION_BASE: Record<
   SurfaceType,
   { friction: number; drag: number; particle: 'smoke' | 'spray' | 'dust' | 'gravel' }
 > = {
-  asphalt: { friction: 1.05, drag: 1.0, particle: 'smoke' },
-  wet_asphalt: { friction: 0.74, drag: 1.12, particle: 'spray' },
-  curb: { friction: 0.96, drag: 1.06, particle: 'smoke' },
-  dirt: { friction: 0.72, drag: 1.28, particle: 'dust' },
-  gravel: { friction: 0.68, drag: 1.35, particle: 'gravel' },
-  sand: { friction: 0.61, drag: 1.44, particle: 'dust' },
-  grass: { friction: 0.56, drag: 1.54, particle: 'dust' },
-  puddle: { friction: 0.42, drag: 1.52, particle: 'spray' },
+  asphalt: { friction: 1.08, drag: 1.0, particle: 'smoke' },
+  wet_asphalt: { friction: 0.78, drag: 1.1, particle: 'spray' },
+  curb: { friction: 0.98, drag: 1.05, particle: 'smoke' },
+  dirt: { friction: 0.78, drag: 1.22, particle: 'dust' },
+  gravel: { friction: 0.74, drag: 1.28, particle: 'gravel' },
+  sand: { friction: 0.66, drag: 1.36, particle: 'dust' },
+  grass: { friction: 0.65, drag: 1.32, particle: 'dust' },
+  puddle: { friction: 0.48, drag: 1.44, particle: 'spray' },
 };
 
 export const DRIVE_PRESET_PROFILE: Record<
@@ -59,9 +59,9 @@ export const DRIVE_PRESET_PROFILE: Record<
 > = {
   arcade: {
     label: 'Arcade',
-    gripScale: 1.18,
+    gripScale: 1.24,
     assistScale: 1.0,
-    steerAssist: 0.45,
+    steerAssist: 0.68,
     defaultSteeringAssist: 'full',
     defaultAbs: true,
     defaultTcs: true,
@@ -69,17 +69,17 @@ export const DRIVE_PRESET_PROFILE: Record<
   },
   sim_lite: {
     label: 'Sim-Lite',
-    gripScale: 1.02,
-    assistScale: 0.65,
-    steerAssist: 0.18,
+    gripScale: 1.1,
+    assistScale: 0.72,
+    steerAssist: 0.38,
     defaultSteeringAssist: 'countersteer',
     defaultAbs: true,
     defaultTcs: true,
-    defaultEsc: false,
+    defaultEsc: true,
   },
   sim: {
     label: 'Simulation',
-    gripScale: 0.94,
+    gripScale: 0.98,
     assistScale: 0.25,
     steerAssist: 0.0,
     defaultSteeringAssist: 'off',
@@ -104,30 +104,129 @@ export const STEERING_ASSIST_PROFILES: Record<
     description: 'Raw steering input with zero countersteer or yaw correction.',
     countersteerGain: 0,
     yawDampGain: 0,
-    speedSteerCurve: 0.007,
+    speedSteerCurve: 0.011,
   },
   countersteer: {
     label: 'Countersteer',
-    description: 'Blends subtle countersteer help during oversteer drifts while preserving angle.',
-    countersteerGain: 0.48,
-    yawDampGain: 0.2,
-    speedSteerCurve: 0.0085,
+    description: 'Smooth speed-sensitive lock + active countersteer help to catch slides.',
+    countersteerGain: 0.62,
+    yawDampGain: 0.42,
+    speedSteerCurve: 0.014,
   },
   stability: {
     label: 'Stability',
-    description: 'Active yaw damping plus countersteer stabilization for high-speed cornering.',
-    countersteerGain: 0.65,
-    yawDampGain: 0.55,
-    speedSteerCurve: 0.0095,
+    description: 'Active yaw damping plus countersteer stabilization for effortless high-speed cornering.',
+    countersteerGain: 0.76,
+    yawDampGain: 0.7,
+    speedSteerCurve: 0.016,
   },
   full: {
     label: 'Full Assist',
     description: 'Maximum corner-entry guidance, speed-sensitive lock & drift recovery.',
-    countersteerGain: 0.85,
-    yawDampGain: 0.85,
-    speedSteerCurve: 0.011,
+    countersteerGain: 0.9,
+    yawDampGain: 0.92,
+    speedSteerCurve: 0.018,
   },
 };
+
+export interface SteerAndStabilityInput {
+  dt: number;
+  rawSteer: number;
+  handbrake: boolean;
+  prevSteerAngle: number;
+  speedMs: number;
+  vForward: number;
+  vLateral: number;
+  yawRate: number;
+  wheelbaseM: number;
+  surfaceGrip: number;
+  massKg: number;
+  drivePreset: DrivePreset;
+  steeringAssist: SteeringAssistMode;
+  escEnabled: boolean;
+}
+
+export interface SteerAndStabilityOutput {
+  steerAngle: number;
+  bodySlipRad: number;
+  yawStabilityTorqueNm: number;
+  escActive: boolean;
+}
+
+/**
+ * Computes progressive speed-sensitive steering, corrected countersteer assist
+ * (+X left / +Z forward / +Y up right-handed frame), and grip-capped yaw stabilization.
+ */
+export function computeSteerAndStability(
+  input: SteerAndStabilityInput
+): SteerAndStabilityOutput {
+  const { dt, rawSteer, handbrake, prevSteerAngle, speedMs, vForward, vLateral, yawRate } = input;
+  const speedKmh = speedMs * 3.6;
+  const preset = DRIVE_PRESET_PROFILE[input.drivePreset];
+  const assistProfile = STEERING_ASSIST_PROFILES[input.steeringAssist];
+
+  // Speed-sensitive lock: ~31 deg at crawl, ~10 deg at 85 km/h, ~5.5 deg at 170 km/h, ~3.6 deg at 260 km/h
+  const speedTerm =
+    Math.pow(Math.max(0, speedKmh) / 46, 1.15) * (0.65 + assistProfile.speedSteerCurve * 56);
+  const maxSteer = 0.54 / (1 + speedTerm);
+
+  // In +Z-fwd, +X-left frame: spinning LEFT (+yaw) puts velocity to RIGHT (-X) => vLateral < 0 => bodySlipRad < 0.
+  // Countersteering out of a LEFT spin requires steering RIGHT (steer < 0), i.e., +bodySlipRad direction.
+  const bodySlipRad =
+    speedMs > 3.5 ? Math.atan2(vLateral, Math.max(2.0, Math.abs(vForward))) : 0;
+  const slipDeadband = 0.055;
+  const excessSlip =
+    Math.abs(bodySlipRad) > slipDeadband
+      ? Math.sign(bodySlipRad) * (Math.abs(bodySlipRad) - slipDeadband)
+      : 0;
+  const countersteerOffset =
+    speedMs > 5 && assistProfile.countersteerGain > 0
+      ? Math.max(-0.34, Math.min(0.34, excessSlip * assistProfile.countersteerGain))
+      : 0;
+
+  const hbScale = handbrake ? 1.18 : 1.0;
+  const targetSteer = Math.max(
+    -maxSteer * 1.18,
+    Math.min(maxSteer * 1.18, rawSteer * maxSteer * hbScale + countersteerOffset)
+  );
+
+  // Smooth progressive turn-in (~8.5/s) so digital keys carve smoothly, fast return-to-center (~15/s)
+  const isCenteringOrReversing =
+    Math.abs(targetSteer) < Math.abs(prevSteerAngle) || targetSteer * prevSteerAngle < 0;
+  const steerRate = isCenteringOrReversing ? 15.0 : 8.5;
+  const steerAngle =
+    prevSteerAngle + (targetSteer - prevSteerAngle) * (1 - Math.exp(-steerRate * dt));
+
+  let yawStabilityTorqueNm = 0;
+  let escActive = false;
+
+  if (speedMs > 5.5) {
+    // Ackermann yaw target capped strictly by physical lateral tire capacity (mu * g * 1.25 / v)
+    const kinematicYawRate = (steerAngle * Math.min(22, speedMs)) / Math.max(2.2, input.wheelbaseM);
+    const maxPhysicalYaw =
+      (Math.max(0.45, input.surfaceGrip) * 9.81 * 1.25) / Math.max(5.5, speedMs);
+    const desiredYawRate = Math.max(-maxPhysicalYaw, Math.min(maxPhysicalYaw, kinematicYawRate));
+    const yawError = desiredYawRate - yawRate;
+
+    const excessiveSlip = Math.abs(bodySlipRad) > 0.16;
+    const excessiveYaw = Math.abs(yawRate) > maxPhysicalYaw * 1.15;
+
+    if (input.escEnabled && (excessiveSlip || excessiveYaw) && !handbrake) {
+      escActive = true;
+      yawStabilityTorqueNm = yawError * input.massKg * 1.75;
+    } else if (assistProfile.yawDampGain > 0 || preset.steerAssist > 0) {
+      const assistWeight = Math.max(assistProfile.yawDampGain, preset.steerAssist);
+      yawStabilityTorqueNm = yawError * input.massKg * 0.65 * assistWeight;
+    }
+  }
+
+  return {
+    steerAngle,
+    bodySlipRad,
+    yawStabilityTorqueNm,
+    escActive,
+  };
+}
 
 export function magicFormula(x: number, B: number, C: number, D: number, E: number): number {
   const bx = B * x;
